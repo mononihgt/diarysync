@@ -20,7 +20,7 @@ from .api import (
     parse_day,
     resolve_window,
 )
-from .config import Settings, load_settings
+from .config import Settings, VaultNotFoundError, load_settings
 from .ledger import Ledger
 from .sources.garmin import GarminAuthError
 
@@ -359,7 +359,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except VaultNotFoundError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":  # pragma: no cover

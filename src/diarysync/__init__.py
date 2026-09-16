@@ -39,7 +39,7 @@ from .api import (
     parse_day,
     resolve_window,
 )
-from .config import Settings, find_vault, load_settings
+from .config import Settings, VaultNotFoundError, find_vault, load_settings
 from .dedup import Decision, DedupPolicy, decide
 from .diary import Diary
 from .ledger import Ledger
@@ -61,6 +61,7 @@ __all__ = [
     "Ledger",
     "Record",
     "Settings",
+    "VaultNotFoundError",
     "SyncReport",
     "WorkEntry",
     "__version__",

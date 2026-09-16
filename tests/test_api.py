@@ -78,6 +78,34 @@ def test_facade_open_discovers_the_vault_from_cwd(vault, monkeypatch):
     assert sync.vault_path == vault.resolve()
 
 
+def test_find_vault_refuses_to_guess(tmp_path, monkeypatch):
+    """Regression: falling back to cwd wrote diaries into the package folder."""
+    from diarysync.config import VaultNotFoundError, find_vault
+
+    workdir = tmp_path / "plain-directory"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    with pytest.raises(VaultNotFoundError, match="vault"):
+        find_vault()
+
+
+def test_find_vault_accepts_an_obsidian_dir_without_a_diary_yet(tmp_path):
+    from diarysync.config import find_vault
+
+    (tmp_path / ".obsidian").mkdir()
+    assert find_vault(tmp_path / ".obsidian") == tmp_path.resolve()
+
+
+def test_facade_accepts_an_explicit_vault_without_discovery(tmp_path):
+    from diarysync import DiarySync
+
+    bare = tmp_path / "no-markers-here"
+    bare.mkdir()
+    sync = DiarySync(vault=bare)
+    assert sync.diary_dir == bare.resolve() / "diary"
+
+
 def test_facade_reads_the_ledger_location(vault):
     sync = DiarySync(vault=vault)
     assert sync.settings.ledger_path == vault.resolve() / ".diarysync" / "ledger.json"

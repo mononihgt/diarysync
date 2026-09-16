@@ -54,16 +54,33 @@ class Settings:
         return self.vault / CONFIG_DIR_NAME / CONFIG_FILE_NAME
 
 
-def find_vault(start: Path | None = None) -> Path:
-    """Walk up from ``start`` looking for a directory that holds ``diary/``.
+#: A directory counts as a vault when it holds one of these.
+VAULT_MARKERS = (DEFAULT_DIARY_DIR, ".obsidian")
 
-    Falls back to ``start`` itself when nothing matches.
+
+class VaultNotFoundError(RuntimeError):
+    """Raised when no Obsidian vault can be located."""
+
+
+def find_vault(start: Path | None = None) -> Path:
+    """Walk up from ``start`` to the nearest directory that looks like a vault.
+
+    A vault is recognised by a ``diary/`` folder or an ``.obsidian/`` folder,
+    so a vault whose diary folder does not exist yet is still discovered.
+
+    Discovery deliberately refuses to guess.  Falling back to the working
+    directory used to mean that running the CLI from inside this package
+    resolved the vault to the package itself and wrote diary files into it.
     """
     current = (start or Path.cwd()).resolve()
     for candidate in (current, *current.parents):
-        if (candidate / DEFAULT_DIARY_DIR).is_dir():
+        if any((candidate / marker).is_dir() for marker in VAULT_MARKERS):
             return candidate
-    return current
+    markers = " 或 ".join(f"{marker}/" for marker in VAULT_MARKERS)
+    raise VaultNotFoundError(
+        f"从 {current} 向上没有找到含 {markers} 的 Obsidian vault。"
+        "请用 --vault / vault= 指定，或设置 DIARYSYNC_VAULT。"
+    )
 
 
 def _read_config_file(path: Path) -> dict:

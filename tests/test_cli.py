@@ -112,6 +112,18 @@ def test_window_defaults():
     assert (until - since).days == 6
 
 
+def test_missing_vault_is_a_clean_error(tmp_path, monkeypatch, capsys):
+    from diarysync import cli
+
+    workdir = tmp_path / "plain-directory"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+
+    assert cli.main(["work", "--days", "1"]) == 2
+    assert "vault" in capsys.readouterr().err
+    assert not (workdir / "diary").exists()
+
+
 def test_doctor_reports_configuration(vault, capsys, monkeypatch):
     monkeypatch.setenv("DIARYSYNC_GARMIN_EMAIL", "me@example.com")
     assert cli.main(["doctor", "--vault", str(vault)]) == 0

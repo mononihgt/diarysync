@@ -168,7 +168,9 @@ python3 -m diarysync doctor
 
 公共开关：`--vault`、`--dry-run`、`--force`、`--json`、`--overlap-ratio`。
 
-`--vault` 省略时会从当前目录向上找第一个含 `diary/` 的目录。
+`--vault` 省略时，会从当前目录向上找最近的含 `diary/` 或 `.obsidian/` 的目录；
+找不到就直接报错，**不会**退化用当前目录（否则在别处跑会把日记写进那个目录）。
+想在任何目录下都能跑，可以设置 `DIARYSYNC_VAULT=/path/to/vault`。
 
 典型输出：
 
