@@ -117,7 +117,7 @@ def _offline_hint(exc: GarminAuthError) -> SystemExit:
         f"Garmin 登录失败：{exc}\n\n"
         "可以改用离线模式：从 https://connect.garmin.cn/app/activities 点击"
         "「导出为csv文献」下载 Activities.csv，然后运行\n"
-        "    diarysync exercise --csv ~/Downloads/Activities.csv"
+        "    python3 -m diarysync exercise --csv ~/Downloads/Activities.csv"
     )
 
 

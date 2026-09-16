@@ -55,7 +55,7 @@ cd ~/Documents/research/projects/diarysync
 # 推荐：uv 会自动准备 Python 3.12
 uv venv --python 3.12 .venv
 uv pip install -e ".[garmin,sessions,dev]"
-.venv/bin/diarysync doctor
+.venv/bin/python -m diarysync doctor
 
 # 或者 pip
 python3.12 -m venv .venv && source .venv/bin/activate
@@ -78,10 +78,10 @@ export DIARYSYNC_GARMIN_EMAIL='you@example.com'
 export DIARYSYNC_GARMIN_PASSWORD='********'
 
 # 2) 确认能登录（会缓存 token 到 ~/.garminconnect）
-diarysync login --vault /path/to/vault
+python3 -m diarysync login --vault /path/to/vault
 
 # 3) 同步最近 30 天的运动
-diarysync exercise --vault /path/to/vault
+python3 -m diarysync exercise --vault /path/to/vault
 ```
 
 三种传参方式，优先级从高到低：
@@ -107,7 +107,7 @@ diarysync exercise --vault /path/to/vault
 3. 运行：
 
 ```bash
-diarysync exercise --csv ~/Downloads/Activities.csv --vault /path/to/vault
+python3 -m diarysync exercise --csv ~/Downloads/Activities.csv --vault /path/to/vault
 ```
 
 CSV 路径和在线路径产出完全相同的记录，两条路径互为备份，去重逻辑也互相认得
@@ -149,21 +149,21 @@ CSV 路径和在线路径产出完全相同的记录，两条路径互为备份�
 想要覆盖去重时：
 
 ```bash
-diarysync exercise --dry-run        # 先看会写什么
-diarysync exercise --force          # 忽略全部去重规则
-diarysync exercise --overlap-ratio 0.9   # 放宽"算作同一条"的门槛
-diarysync ledger                    # 查看已记录的身份键
+python3 -m diarysync exercise --dry-run        # 先看会写什么
+python3 -m diarysync exercise --force          # 忽略全部去重规则
+python3 -m diarysync exercise --overlap-ratio 0.9   # 放宽"算作同一条"的门槛
+python3 -m diarysync ledger                    # 查看已记录的身份键
 ```
 
 ## 命令一览
 
 ```bash
-diarysync exercise [--csv PATH] [--since 2026-08-01] [--until 2026-09-16] [--days 30]
-diarysync work     [--source all|codex|dsh] [--since ...] [--min-minutes 5]
-diarysync sync     [--work-only | --exercise-only]
-diarysync login
-diarysync ledger   [--forget KEY...]
-diarysync doctor
+python3 -m diarysync exercise [--csv PATH] [--since 2026-08-01] [--until 2026-09-16] [--days 30]
+python3 -m diarysync work     [--source all|codex|dsh] [--since ...] [--min-minutes 5]
+python3 -m diarysync sync     [--work-only | --exercise-only]
+python3 -m diarysync login
+python3 -m diarysync ledger   [--forget KEY...]
+python3 -m diarysync doctor
 ```
 
 公共开关：`--vault`、`--dry-run`、`--force`、`--json`、`--overlap-ratio`。
@@ -269,7 +269,7 @@ entries = diarysync.collect_work(
 
 ## 工作记录从哪里来
 
-`diarysync work` 读取本机 agent 会话，按 **（来源, 会话, 本地日期）** 切分成时间段：
+`python3 -m diarysync work` 读取本机 agent 会话，按 **（来源, 会话, 本地日期）** 切分成时间段：
 
 | 来源 | 路径 | 说明 |
 | --- | --- | --- |
@@ -294,7 +294,7 @@ entries = diarysync.collect_work(
 想要更聪明的摘要，可以外挂一个 LLM：
 
 ```bash
-diarysync work --summarizer "llm -m gpt-4o-mini '把下面这段话压缩成一句中文工作摘要'"
+python3 -m diarysync work --summarizer "llm -m gpt-4o-mini '把下面这段话压缩成一句中文工作摘要'"
 # 或写进 <vault>/.diarysync/config.toml: summarizer_cmd = "..."
 ```
 
@@ -347,7 +347,7 @@ pytest -q
 
 - Garmin 官方没有公开 API，`garminconnect` 是社区逆向实现；Garmin 改接口或
   触发风控时在线同步会失败，此时用 `--csv` 离线路径。
-- `diarysync work` 的摘要来自本地规则，不是真正的语义理解；需要质量更高的
+- `python3 -m diarysync work` 的摘要来自本地规则，不是真正的语义理解；需要质量更高的
   摘要请配置 `--summarizer`。
 - 时间窗重叠判断是启发式的。`overlap_ratio` 调小会更激进地去重（可能漏记），
   调大会更容易产生重复；`--dry-run` 是唯一可靠的验证方式。
