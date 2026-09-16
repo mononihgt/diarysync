@@ -351,3 +351,7 @@ pytest -q
   摘要请配置 `--summarizer`。
 - 时间窗重叠判断是启发式的。`overlap_ratio` 调小会更激进地去重（可能漏记），
   调大会更容易产生重复；`--dry-run` 是唯一可靠的验证方式。
+
+## License
+
+MIT — 见 [LICENSE](LICENSE)。
