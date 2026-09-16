@@ -38,7 +38,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py39"
 
 [tool.ruff.lint]
 # The diary is a local-time tool, so the timezone (DTZ) rules do not apply.
