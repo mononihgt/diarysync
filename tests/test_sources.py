@@ -90,6 +90,41 @@ def test_api_payload_without_start_is_ignored():
     assert _activity_from_payload({"startTimeLocal": "2026-08-22 16:14:45"}) is None
 
 
+def test_explain_login_error_names_only_the_missing_field():
+    from diarysync.sources.garmin import explain_login_error
+
+    err = explain_login_error(
+        Exception("Username and password are required"),
+        email=None,
+        password="pw",
+        token_store="~/.garminconnect",
+    )
+    assert err.needs_credentials is True
+    assert "邮箱" in str(err)
+    assert "密码（" not in str(err)
+
+
+def test_explain_login_error_flags_a_stale_token_cache():
+    from diarysync.sources.garmin import explain_login_error
+
+    err = explain_login_error(
+        Exception("Failed to retrieve social profile"),
+        email="me@example.com",
+        password="pw",
+        token_store="~/.garminconnect",
+    )
+    assert err.needs_credentials is False
+    assert "token" in str(err)
+
+
+def test_explain_login_error_passes_through_other_failures():
+    from diarysync.sources.garmin import explain_login_error
+
+    err = explain_login_error(Exception("boom"), email="a@b.c", password="p", token_store=None)
+    assert "boom" in str(err)
+    assert err.needs_credentials is False
+
+
 def test_type_vocabulary():
     assert canonical_type_key("treadmill_running") == "treadmill_running"
     assert canonical_type_key("跑步机") == "treadmill_running"

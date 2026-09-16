@@ -29,8 +29,16 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from .config import Settings, find_vault, load_settings, prompt_mfa, prompt_password
+from .config import (
+    Settings,
+    find_vault,
+    load_settings,
+    prompt_email,
+    prompt_mfa,
+    prompt_password,
+)
 from .models import Activity, Record, WorkEntry
+from .sources.garmin import GarminAuthError
 from .sync import SyncReport, run
 
 __all__ = [
@@ -127,8 +135,8 @@ def collect_activities(
     from .sources.garmin import fetch_activities
 
     return fetch_activities(
-        settings.garmin_email or "",
-        settings.garmin_password or "",
+        settings.garmin_email,
+        settings.garmin_password,
         start=start,
         end=end,
         is_cn=settings.garmin_is_cn,
@@ -279,31 +287,43 @@ class DiarySync:
     # -- authentication ----------------------------------------------------
 
     def login(self) -> str:
-        """Verify the Garmin credentials and cache tokens."""
+        """Verify Garmin access and cache tokens.
+
+        A valid token cache is sufficient: credentials are only asked for when
+        the library reports that a credential exchange is genuinely required.
+        """
+        try:
+            return self._probe()
+        except GarminAuthError as exc:
+            if not (exc.needs_credentials and self.prompt_for_password):
+                raise
+            self._ensure_credentials()
+            return self._probe()
+
+    def _probe(self) -> str:
         from .sources.garmin import probe_login
 
-        self._require_credentials()
         return probe_login(
-            self.settings.garmin_email or "",
-            self.settings.garmin_password or "",
+            self.settings.garmin_email,
+            self.settings.garmin_password,
             is_cn=self.settings.garmin_is_cn,
             token_store=self.settings.token_store,
         )
 
-    def _require_credentials(self) -> None:
-        """Resolve the Garmin password, prompting only when actually needed.
+    def _ensure_credentials(self) -> None:
+        """Prompt for whichever credential is missing, then let the caller retry.
 
-        Constructing a facade is deliberately free of side effects: a script
-        that only writes offline CSV records never sees a password prompt.
+        Only reached after the library has said the token cache is not enough,
+        so a working cache never triggers a prompt.  Constructing a facade stays
+        free of side effects, which keeps offline and scripted use quiet.
         """
-        if self.settings.garmin_password:
-            return
-        if self.prompt_for_password:
-            self.settings = replace(self.settings, garmin_password=prompt_password())
-            return
-        raise ValueError(
-            "No Garmin password available. Pass password=..., set "
-            "DIARYSYNC_GARMIN_PASSWORD, or enable prompt_for_password."
+        email, password = self.settings.garmin_email, self.settings.garmin_password
+        if not email:
+            email = prompt_email()
+        if not password:
+            password = prompt_password()
+        self.settings = replace(
+            self.settings, garmin_email=email or None, garmin_password=password or None
         )
 
     def _mfa(self) -> Callable[[], str] | None:
@@ -322,11 +342,18 @@ class DiarySync:
         start, end = resolve_window(
             since=since, until=until, days=days, default_days=DEFAULT_WINDOW_DAYS
         )
-        if csv is None:
-            self._require_credentials()
-        return collect_activities(
-            self.settings, since=start, until=end, csv_path=csv, mfa_prompt=self._mfa()
-        )
+        if csv is not None:
+            return collect_activities(self.settings, since=start, until=end, csv_path=csv)
+        try:
+            return self._fetch_activities(start, end)
+        except GarminAuthError as exc:
+            if not (exc.needs_credentials and self.prompt_for_password):
+                raise
+            self._ensure_credentials()
+            return self._fetch_activities(start, end)
+
+    def _fetch_activities(self, start: date, end: date) -> list[Activity]:
+        return collect_activities(self.settings, since=start, until=end, mfa_prompt=self._mfa())
 
     def work_entries(
         self,

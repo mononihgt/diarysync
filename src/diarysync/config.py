@@ -162,6 +162,18 @@ def prompt_password(prompt: str = "Garmin password: ") -> str:
     return getpass.getpass(prompt)
 
 
+def prompt_email(prompt: str = "Garmin email: ") -> str:
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "No Garmin email available. Pass --email, set "
+            "DIARYSYNC_GARMIN_EMAIL, or add garmin_email to .diarysync/config.toml."
+        )
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
 def prompt_mfa() -> str:
     if not sys.stdin.isatty():
         return ""

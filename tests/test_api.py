@@ -92,11 +92,89 @@ def test_configure_returns_an_independent_copy(vault):
     assert other.settings.vault == sync.settings.vault
 
 
-def test_login_requires_credentials(vault):
-    sync = DiarySync(vault=vault, password=None)
-    sync.settings.garmin_password = None
-    with pytest.raises(ValueError, match="password"):
+def test_login_reuses_the_token_cache_without_any_credentials(vault, monkeypatch):
+    """A valid token store means email and password are not needed at all."""
+    seen = {}
+
+    def fake_probe_login(email, password, **kwargs):
+        seen["email"], seen["password"] = email, password
+        return "login ok against connect.garmin.cn"
+
+    monkeypatch.setattr("diarysync.sources.garmin.probe_login", fake_probe_login)
+
+    sync = DiarySync(vault=vault, email=None, password=None)
+    assert sync.login() == "login ok against connect.garmin.cn"
+    assert seen == {"email": None, "password": None}
+
+
+def test_missing_credentials_are_prompted_for_then_retried(vault, monkeypatch):
+    """The prompt must ask for the email too, not just the password."""
+    import diarysync.api as api
+    from diarysync.sources.garmin import GarminAuthError
+
+    attempts = []
+
+    def fake_probe_login(email, password, **kwargs):
+        attempts.append((email, password))
+        if len(attempts) == 1:
+            raise GarminAuthError("no usable token", needs_credentials=True)
+        return "ok"
+
+    monkeypatch.setattr("diarysync.sources.garmin.probe_login", fake_probe_login)
+    monkeypatch.setattr(api, "prompt_email", lambda *a, **k: "me@example.com")
+    monkeypatch.setattr(api, "prompt_password", lambda *a, **k: "secret")
+
+    sync = DiarySync(vault=vault, prompt_for_password=True)
+    assert sync.login() == "ok"
+    assert attempts == [(None, None), ("me@example.com", "secret")]
+    assert sync.settings.garmin_email == "me@example.com"
+
+
+def test_credentials_are_not_prompted_for_when_disabled(vault, monkeypatch):
+    from diarysync.sources.garmin import GarminAuthError
+
+    def boom(*args, **kwargs):
+        raise GarminAuthError("no usable token", needs_credentials=True)
+
+    monkeypatch.setattr("diarysync.sources.garmin.probe_login", boom)
+    sync = DiarySync(vault=vault, prompt_for_password=False)
+    with pytest.raises(GarminAuthError):
         sync.login()
+
+
+def test_activities_prompts_once_then_retries(vault, monkeypatch):
+    import diarysync.api as api
+    from diarysync.sources.garmin import GarminAuthError
+
+    calls = []
+
+    def fake_collect(settings, **kwargs):
+        calls.append((settings.garmin_email, settings.garmin_password))
+        if len(calls) == 1:
+            raise GarminAuthError("no usable token", needs_credentials=True)
+        return []
+
+    monkeypatch.setattr(api, "collect_activities", fake_collect)
+    monkeypatch.setattr(api, "prompt_email", lambda *a, **k: "me@example.com")
+    monkeypatch.setattr(api, "prompt_password", lambda *a, **k: "secret")
+
+    sync = DiarySync(vault=vault, prompt_for_password=True)
+    assert sync.activities(days=1) == []
+    assert calls == [(None, None), ("me@example.com", "secret")]
+
+
+def test_offline_activities_never_touch_credentials(vault, csv_file, monkeypatch):
+    import diarysync.api as api
+
+    def explode(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("offline mode must not resolve credentials")
+
+    monkeypatch.setattr(api, "prompt_email", explode)
+    monkeypatch.setattr(api, "prompt_password", explode)
+
+    sync = DiarySync(vault=vault, prompt_for_password=True)
+    activities = sync.activities(since="2026-09-01", until="2026-09-16", csv=csv_file)
+    assert [a.day for a in activities] == [date(2026, 9, 14), date(2026, 9, 15)]
 
 
 # ---------------------------------------------------------------------------

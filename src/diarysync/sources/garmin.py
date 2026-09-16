@@ -19,7 +19,15 @@ from ..models import Activity
 
 
 class GarminAuthError(RuntimeError):
-    """Raised when Garmin rejects the credentials or demands MFA."""
+    """Raised when Garmin rejects the credentials or demands MFA.
+
+    ``needs_credentials`` marks the one recoverable case: no usable cached
+    token, so an interactive caller may prompt and retry once.
+    """
+
+    def __init__(self, message: str, *, needs_credentials: bool = False) -> None:
+        super().__init__(message)
+        self.needs_credentials = needs_credentials
 
 
 def _import_garmin():
@@ -35,27 +43,62 @@ def _import_garmin():
 
 
 def _build_client(
-    email: str,
-    password: str,
+    email: str | None,
+    password: str | None,
     *,
     is_cn: bool,
     mfa_prompt: Callable[[], str] | None,
 ):
+    """Construct a client without pre-validating credentials.
+
+    ``garminconnect`` loads cached OAuth tokens *before* it falls back to a
+    credential exchange, so a valid token store means the email and password
+    are not needed at all.  Rejecting empty credentials here breaks that path.
+    """
     Garmin = _import_garmin()
-    if not email or not password:
-        raise GarminAuthError("Both a Garmin email and password are required for online sync.")
     return Garmin(
-        email,
-        password,
+        email or None,
+        password or None,
         is_cn=is_cn,
         prompt_mfa=mfa_prompt if mfa_prompt is not None else (lambda: ""),
         return_on_mfa=mfa_prompt is None,
     )
 
 
+def explain_login_error(
+    exc: Exception,
+    *,
+    email: str | None,
+    password: str | None,
+    token_store: str | Path | None,
+) -> GarminAuthError:
+    """Turn a raw garminconnect failure into something actionable."""
+    text = str(exc)
+    lowered = text.lower()
+    store = Path(token_store).expanduser() if token_store else Path("~/.garminconnect").expanduser()
+
+    if "username and password are required" in lowered:
+        missing = []
+        if not email:
+            missing.append("邮箱（--email / DIARYSYNC_GARMIN_EMAIL / 配置里的 garmin_email）")
+        if not password:
+            missing.append("密码（--password / DIARYSYNC_GARMIN_PASSWORD）")
+        detail = "、".join(missing) if missing else "邮箱与密码"
+        return GarminAuthError(
+            f"{store} 里没有可复用的 token，需要 Garmin {detail}。",
+            needs_credentials=True,
+        )
+    if "social profile" in lowered:
+        return GarminAuthError(
+            f"缓存的 Garmin token 无法使用（{store}）：可能已失效或与账号区域不匹配。"
+            "请用邮箱密码重新登录一次，或删除该目录后重试。"
+        )
+    return GarminAuthError(f"Garmin 登录失败：{text}")
+
+
 def login(
-    email: str,
-    password: str,
+    email: str | None,
+    password: str | None,
     *,
     is_cn: bool = True,
     token_store: str | Path | None = None,
@@ -71,7 +114,9 @@ def login(
     try:
         result = client.login(store)
     except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the user
-        raise GarminAuthError(f"Garmin login failed: {exc}") from exc
+        raise explain_login_error(
+            exc, email=email, password=password, token_store=token_store
+        ) from exc
     if isinstance(result, tuple) and result and result[0] == "needs_mfa":
         raise GarminAuthError(
             "Garmin requires a multi-factor authentication code. Re-run with an "
@@ -82,8 +127,8 @@ def login(
 
 
 def probe_login(
-    email: str,
-    password: str,
+    email: str | None,
+    password: str | None,
     *,
     is_cn: bool = True,
     token_store: str | Path | None = None,
@@ -155,8 +200,8 @@ def _first_number(payload: dict, *keys: str) -> float | None:
 
 
 def fetch_activities(
-    email: str,
-    password: str,
+    email: str | None,
+    password: str | None,
     *,
     start: date,
     end: date,
