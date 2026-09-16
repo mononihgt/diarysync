@@ -1,0 +1,33 @@
+# Copy to <vault>/.diarysync/config.toml (or ~/.config/diarysync/config.toml).
+# Every key is optional; command-line flags and environment variables win.
+
+# Where the diary markdown lives, relative to the vault or absolute.
+diary_dir = "diary"
+
+# Garmin Connect account.  Prefer DIARYSYNC_GARMIN_EMAIL / _PASSWORD in the
+# environment; only put the password here if you accept it living in plain text.
+garmin_email = "you@example.com"
+# garmin_password = "..."
+
+# true = connect.garmin.cn (China), false = connect.garmin.com
+garmin_is_cn = true
+
+# Where garminconnect caches its OAuth tokens (mode 0600).
+token_store = "~/.garminconnect"
+
+# Dedup: fraction of the shorter time window that must be shared before a new
+# Garmin activity counts as "already written by hand".  Lower = more aggressive
+# dedup, higher = more likely to add a duplicate line.
+overlap_ratio = 0.6
+use_ledger = true
+
+# The check-in item written under "# 打卡" whenever a day has an activity.
+checkin_label = "运动"
+complete_unchecked_checkin = true
+
+# Which agent transcripts `diarysync work` reads.
+work_sources = ["codex", "dsh"]
+
+# Optional: replace the built-in heuristic summary with an LLM call.
+# The command receives the raw prompt on stdin and must print one line.
+# summarizer_cmd = "llm -m gpt-4o-mini '压缩成一句中文工作摘要'"

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "diarysync"
+version = "0.2.0"
+description = "Sync Garmin activities and agent work logs into an Obsidian diary, idempotently. Usable as a library or a CLI."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "diarysync contributors" }]
+keywords = ["garmin", "obsidian", "diary", "journal", "automation"]
+dependencies = [
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# Online Garmin Connect sync. garminconnect itself requires Python >= 3.12.
+garmin = [
+    "garminconnect>=0.3.5",
+    "curl_cffi>=0.7",
+]
+# Reading compressed DeepSeek Harness session transcripts.
+sessions = [
+    "zstandard>=0.22",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+diarysync = "diarysync.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/diarysync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# The diary is a local-time tool, so the timezone (DTZ) rules do not apply.
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
