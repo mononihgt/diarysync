@@ -249,9 +249,9 @@ def cmd_doctor(args) -> int:
     roots = session_sources.default_session_roots()
     print("\n工作记录来源：")
     if not roots:
-        print("  未发现 ~/.codex/sessions 或 ~/.dsh/sessions")
+        print("  未发现 ~/.claude/projects、~/.codex/sessions 或 ~/.dsh/sessions")
     for origin, root in roots.items():
-        print(f"  {origin:<6} {root}")
+        print(f"  {origin:<7} {root}")
     return 0
 
 
@@ -293,7 +293,7 @@ def _add_window(parser: argparse.ArgumentParser) -> None:
 def _add_work_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--source",
-        choices=("all", "codex", "dsh"),
+        choices=("all", "claude", "codex", "dsh"),
         default="all",
         help="工作记录读取哪些会话来源（不影响运动同步）",
     )

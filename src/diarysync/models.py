@@ -36,8 +36,12 @@ class Record:
 
     @property
     def body(self) -> str:
-        """Everything after the checkbox marker, e.g. ``#运动 跑步 杭州市 - 基础训练``."""
-        parts = [f"#{self.tag}"]
+        """Everything after the checkbox marker, e.g. ``#运动 跑步 杭州市 - 基础训练``.
+
+        A record with no tag (a vault that has no tags yet) renders the summary
+        alone instead of creating a new ``#tag``.
+        """
+        parts = [f"#{self.tag}"] if self.tag else []
         if self.summary:
             parts.append(self.summary)
         return " ".join(parts)
@@ -132,6 +136,10 @@ class WorkEntry(Record):
         prompt: str = "",
         source: str = "codex",
     ) -> WorkEntry:
+        # A session that spans midnight yields one entry per local day, so the
+        # day is part of the identity: keyed on the session alone, the ledger
+        # would suppress every day after the first one it saw.
+        source_id = f"{source}:{session_id}:{day.isoformat()}" if session_id else None
         return cls(
             day=day,
             start=start,
@@ -139,7 +147,7 @@ class WorkEntry(Record):
             tag=tag,
             summary=summary,
             category=CATEGORY_WORK,
-            source_id=f"{source}:{session_id}" if session_id else None,
+            source_id=source_id,
             extra={"source": source, "session_id": session_id},
             session_id=session_id,
             prompt=prompt,

@@ -129,7 +129,13 @@ def _tag_overlap_reason(
     record: Record, entries: list[ScheduleEntry], policy: DedupPolicy
 ) -> str | None:
     """Report an existing same-kind, same-tag line whose window covers ``record``."""
-    marker = "#运动" if record.category == CATEGORY_EXERCISE else f"#{record.tag}"
+    if record.category == CATEGORY_EXERCISE:
+        marker = "#运动"
+    elif record.tag:
+        marker = f"#{record.tag}"
+    else:
+        # 无 tag 的 work 记录没有可比的 marker，交给窗口孪生规则。
+        return None
     new_window = _record_window(record)
     for entry in entries:
         if not entry.has_window or marker not in entry.body:

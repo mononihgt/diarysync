@@ -47,7 +47,7 @@ class Settings:
     checkin_label: str = "运动"
     complete_unchecked_checkin: bool = True
     summarizer_cmd: str | None = None
-    work_sources: tuple[str, ...] = ("codex", "dsh")
+    work_sources: tuple[str, ...] = ("claude", "codex", "dsh")
 
     @property
     def config_path(self) -> Path:

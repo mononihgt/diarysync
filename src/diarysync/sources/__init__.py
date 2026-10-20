@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from .garmin import GarminAuthError, fetch_activities, probe_login
 from .garmin_csv import load_csv
-from .sessions import collect_work_entries, read_codex_events, read_dsh_events
+from .sessions import (
+    collect_work_entries,
+    read_claude_events,
+    read_codex_events,
+    read_dsh_events,
+)
 
 __all__ = [
     "GarminAuthError",
@@ -12,6 +17,7 @@ __all__ = [
     "fetch_activities",
     "load_csv",
     "probe_login",
+    "read_claude_events",
     "read_codex_events",
     "read_dsh_events",
 ]

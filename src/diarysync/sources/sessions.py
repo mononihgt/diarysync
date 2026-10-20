@@ -1,7 +1,9 @@
 """Reconstruct work blocks from local agent session transcripts.
 
-Two transcript formats are supported:
+Three transcript formats are supported:
 
+* **Claude Code** — ``~/.claude/projects/<slug>/<session-uuid>.jsonl`` (one JSON
+  object per line).
 * **Codex** — ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`` (one JSON object
   per line) plus ``~/.codex/history.jsonl`` for prompt text.
 * **DeepSeek Harness** — ``~/.dsh/sessions/<cwd>/session-<id>/session.jsonl.zstd``
@@ -9,7 +11,8 @@ Two transcript formats are supported:
 
 A session that spans several days is split per local day.  The time window is
 the min/max event timestamp of that day; the summary is the first real user
-prompt; the tag comes from :func:`infer_tag`.
+prompt; the tag comes from :func:`infer_tag`, restricted to tags the vault
+already uses.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
@@ -27,6 +30,7 @@ from pathlib import Path
 
 from ..models import WorkEntry
 
+DEFAULT_CLAUDE_ROOT = Path("~/.claude")
 DEFAULT_CODEX_ROOT = Path("~/.codex")
 DEFAULT_DSH_ROOT = Path("~/.dsh")
 
@@ -43,6 +47,24 @@ _BOILERPLATE_PREFIXES = (
     "<available_skills",
     "<user_shell_command",
     "<command>",
+    # Claude Code wraps slash commands and `!` shell escapes in these tags.
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    # Claude Code hook payloads.
+    "<user-prompt-submit-hook>",
+    "<session-start-hook>",
+    "<pre-tool-use-hook>",
+    "<post-tool-use-hook>",
+    "<task-notification>",
+    # Inter-agent chatter delivered into a session's input stream.
+    "Another Claude session sent a message",
+    # Editor context Claude Code attaches to a prompt.
+    "<ide_opened_file>",
+    "<ide_selection>",
     "<image",
     "<local-command",
     "</",
@@ -50,6 +72,8 @@ _BOILERPLATE_PREFIXES = (
     "You are `/root`",
     "Filesystem sandboxing defines",
     "The following is the Codex agent history",
+    "This session is being continued from a previous conversation",
+    "[Request interrupted by user",
     "TRANSCRIPT START",
 )
 
@@ -199,6 +223,119 @@ def _parse_timestamp(value) -> datetime | None:
 def _is_boilerplate(text: str) -> bool:
     stripped = text.lstrip()
     return any(stripped.startswith(prefix) for prefix in _BOILERPLATE_PREFIXES)
+
+
+#: ``promptSource`` values that mean a human authored the prompt.  Anything
+#: else (``system``) is a notification the harness injected on its own.
+_HUMAN_PROMPT_SOURCES = frozenset({"typed", "queued"})
+
+
+def read_claude_events(root: str | Path = DEFAULT_CLAUDE_ROOT) -> Iterator[SessionEvent]:
+    """Yield user/assistant events from Claude Code transcripts.
+
+    Claude Code writes one JSONL file per session to
+    ``projects/<slug>/<session-uuid>.jsonl``, interleaving the real
+    conversation with everything the harness does around it.  Four kinds of
+    record are dropped, because writing them into a diary buries the work:
+
+    * ``isSidechain`` — a sub-agent's own conversation, not the human's.
+    * ``isMeta`` — injected context: ``<local-command-caveat>`` wrappers, image
+      resize notices, expanded slash commands, the ``/context`` report.
+    * tool results — one ``user`` record per tool call, carrying no prompt.
+    * ``origin.kind == "task-notification"`` — background-task chatter.
+
+    What survives on the ``user`` side is what the human actually typed;
+    ``assistant`` records contribute their prose, never ``thinking`` or
+    ``tool_use``.
+    """
+    projects_dir = Path(root).expanduser() / "projects"
+    if not projects_dir.is_dir():
+        return
+    for path in sorted(projects_dir.rglob("*.jsonl")):
+        # Sub-agent transcripts live under a ``subagents/`` folder.  Their
+        # entries carry ``isSidechain`` too, but skip the file outright so a
+        # future format change cannot leak them in.
+        if "subagents" in path.relative_to(projects_dir).parts:
+            continue
+        yield from _claude_events_from_file(path)
+
+
+def _claude_events_from_file(path: Path) -> list[SessionEvent]:
+    fallback_id = path.stem
+    events: list[SessionEvent] = []
+    for payload in _iter_jsonl(path):
+        if payload.get("isSidechain") is True or payload.get("isMeta") is True:
+            continue
+        kind = payload.get("type")
+        if kind not in ("user", "assistant"):
+            continue
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            continue
+        ts = _parse_timestamp(payload.get("timestamp"))
+        if ts is None:
+            continue
+        content = message.get("content")
+        if kind == "user" and not _claude_is_human_turn(payload, content):
+            continue
+        for text in _claude_texts(content):
+            if kind == "user" and _is_boilerplate(text):
+                continue
+            events.append(
+                SessionEvent(payload.get("sessionId") or fallback_id, ts, kind, text, "claude")
+            )
+    return events
+
+
+def _claude_texts(content) -> Iterator[str]:
+    """Yield the prose of a Claude Code message, skipping non-text blocks.
+
+    ``content`` is a string on real human prompts and on injected notices, but
+    a list of typed blocks everywhere else.
+    """
+    if isinstance(content, str):
+        if content.strip():
+            yield content
+        return
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.strip():
+            yield text
+
+
+def _claude_is_human_turn(payload: dict, content) -> bool:
+    """Classify a ``user`` record as a typed prompt rather than framework noise.
+
+    Every tool call produces its own ``user`` record, so the ``type`` field is
+    nowhere near enough to find what the human asked.  Metadata is trusted when
+    present and the content is inspected when it is not, mirroring
+    :func:`_thread_is_user_session` for Codex: older transcripts carry neither
+    ``origin`` nor ``promptSource``, and discarding them wholesale would lose
+    real work.
+    """
+    origin = payload.get("origin")
+    if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
+        return False
+    prompt_source = payload.get("promptSource")
+    if prompt_source is not None and prompt_source not in _HUMAN_PROMPT_SOURCES:
+        return False
+    if "toolUseResult" in payload:
+        return False
+    if _claude_has_tool_result(content):
+        return False
+    return True
+
+
+def _claude_has_tool_result(content) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
 
 
 def read_codex_events(root: str | Path = DEFAULT_CODEX_ROOT) -> Iterator[SessionEvent]:
@@ -353,18 +490,62 @@ _TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 DEFAULT_TAG = "工作"
+#: 直接写出已有 tag 名时使用的分数，高于任何关键词命中次数。
+_DIRECT_MENTION_SCORE = 1000
 
 
-def infer_tag(text: str) -> str:
-    """Pick a ``#tag`` for a work block from its prompt text."""
+def _mentions_tag(lowered_text: str, tag: str) -> bool:
+    """prompt 是否真的提到了这个 tag；ASCII tag 要求词边界，避免 #ai 命中 said。"""
+    lowered = tag.lower()
+    if not lowered.isascii():
+        return lowered in lowered_text
+    pattern = rf"(?<![a-z0-9_/-]){re.escape(lowered)}(?![a-z0-9_/-])"
+    return re.search(pattern, lowered_text) is not None
+
+
+def infer_tag(
+    text: str,
+    *,
+    allowed_tags: Sequence[str] | None = None,
+) -> str:
+    """Pick a ``#tag`` for a work block from its prompt text.
+
+    ``allowed_tags`` restricts the answer to tags the vault already uses,
+    ordered most frequent first.  A tag named in the prompt wins over the
+    keyword rules; when nothing matches, the first allowed tag is used.  An
+    empty vocabulary yields an empty tag, so a new tag is never invented.
+    """
     lowered = text.lower()
-    best_tag = DEFAULT_TAG
+    if allowed_tags is None:
+        best_tag = DEFAULT_TAG
+        best_score = 0
+        for tag, keywords in _TAG_RULES:
+            score = sum(1 for keyword in keywords if keyword.lower() in lowered)
+            if score > best_score:
+                best_tag, best_score = tag, score
+        return best_tag
+
+    if not allowed_tags:
+        return ""
+
+    canonical = {tag.lower(): tag for tag in allowed_tags}
+    best_tag = ""
     best_score = 0
     for tag, keywords in _TAG_RULES:
+        existing = canonical.get(tag.lower())
+        if existing is None:
+            continue
         score = sum(1 for keyword in keywords if keyword.lower() in lowered)
         if score > best_score:
-            best_tag, best_score = tag, score
-    return best_tag
+            best_tag, best_score = existing, score
+    # prompt 直接提到某个已有 tag 时优先采用它；更长（更具体）的 tag 胜出，
+    # 例如同时存在 #工作 与 #学生工作 时，"处理学生工作" 选后者。
+    for tag in allowed_tags:
+        if len(tag) >= 2 and _mentions_tag(lowered, tag):
+            score = _DIRECT_MENTION_SCORE + len(tag)
+            if score > best_score:
+                best_tag, best_score = tag, score
+    return best_tag or allowed_tags[0]
 
 
 #: A prompt line shorter than this is treated as a heading ("Purpose",
@@ -433,8 +614,13 @@ def collect_work_entries(
     summarizer: Callable[[str], str] | None = None,
     summary_limit: int = 80,
     min_minutes: int = 0,
+    allowed_tags: Sequence[str] | None = None,
 ) -> list[WorkEntry]:
-    """Group events into one work entry per (origin, session, local day)."""
+    """Group events into one work entry per (origin, session, local day).
+
+    ``allowed_tags`` is forwarded to :func:`infer_tag`; ``None`` keeps the
+    unrestricted keyword rules for callers that bring their own vocabulary.
+    """
     summarise = summarizer or (lambda text: summarise_prompt(text, summary_limit))
 
     def sort_key(event: SessionEvent):
@@ -472,7 +658,7 @@ def collect_work_entries(
                 day=day,
                 start=first,
                 end=end_dt,
-                tag=infer_tag(prompt),
+                tag=infer_tag(prompt, allowed_tags=allowed_tags),
                 summary=summary,
                 session_id=session_id,
                 prompt=prompt,
@@ -512,6 +698,9 @@ def merge_overlapping(entries: list[WorkEntry]) -> list[WorkEntry]:
 
 def default_session_roots() -> dict[str, Path]:
     roots: dict[str, Path] = {}
+    claude = Path(os.environ.get("CLAUDE_CONFIG_DIR", DEFAULT_CLAUDE_ROOT)).expanduser()
+    if (claude / "projects").is_dir():
+        roots["claude"] = claude
     codex = Path(os.environ.get("CODEX_HOME", DEFAULT_CODEX_ROOT)).expanduser()
     if (codex / "sessions").is_dir():
         roots["codex"] = codex

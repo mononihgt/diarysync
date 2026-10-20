@@ -141,6 +141,15 @@ def make_work(day: date, start: str, end: str, tag: str, summary: str = "做点�
     )
 
 
+def test_untagged_work_record_renders_without_a_hash_and_has_no_tag_marker(tmp_path: Path):
+    diary = write_diary(tmp_path, "# 日程\n\n- [x] 09:00 - 10:00 #科研 看论文\n")
+    record = make_work(date(2026, 8, 14), "09:30", "10:00", "", "看论文")
+
+    assert record.schedule_line() == "- [x] 09:30 - 10:00 看论文"
+    decision = decide(record, diary, Ledger(tmp_path / "l.json"), DedupPolicy())
+    assert decision.action == ACTION_INSERT
+
+
 def test_work_record_is_suppressed_by_a_same_tag_line(tmp_path: Path):
     diary = write_diary(
         tmp_path,

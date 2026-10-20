@@ -18,7 +18,7 @@
 - [x] 16:14 - 16:47 #运动 跑步 衢州市 - 基础训练
 ```
 
-写进对应日期的日记；同时把 `~/.codex`、`~/.dsh` 里的会话历史整理成
+写进对应日期的日记；同时把 `~/.claude`、`~/.codex`、`~/.dsh` 里的会话历史整理成
 
 ```markdown
 - [x] 13:53 - 14:36 #科研 对照原始三狼代码，核查两狼 RS 评估与 shared/individ checkpoint
@@ -38,7 +38,7 @@
 ### 装到当前 Python（`python3 -m diarysync` 直接可用）
 
 ```bash
-cd ~/Documents/research/projects/diarysync
+cd ~/Documents/research/projects/tools/diarysync
 python3 -m pip install --user .
 python3 -m diarysync doctor
 ```
@@ -50,7 +50,7 @@ macOS 上 `pip install --user` 会把脚本放进
 ### 开发安装（含在线同步与测试）
 
 ```bash
-cd ~/Documents/research/projects/diarysync
+cd ~/Documents/research/projects/tools/diarysync
 
 # 推荐：uv 会自动准备 Python 3.12
 uv venv --python 3.12 .venv
@@ -119,6 +119,8 @@ CSV 路径和在线路径产出完全相同的记录，两条路径互为备份�
 
 1. **Ledger（跨运行幂等）** — 每次写入都会把记录的身份键记到
    `<vault>/.diarysync/ledger.json`。重复运行、换窗口重跑，都不会重复写。
+   身份键按 **（来源, 会话, 本地日期）** 生成：跨午夜的会话在两天各记一条，
+   第二天不会被第一天的键挡住。
 2. **整行比对** — 已存在的日程行与待写入行完全相同则跳过。
 3. **时间窗重叠** — 对 `#运动` 行做重叠度计算，用较短的窗口做分母：
 
@@ -143,6 +145,11 @@ CSV 路径和在线路径产出完全相同的记录，两条路径互为备份�
 
 **运动与工作互不抑制**：`#科研` 的会话和同一时段的跑步是两条记录，都会保留。
 
+同一段会话可能出现在多个 transcript 里——`--resume` / fork 出来的新会话会把
+之前的对话连同原始时间戳一起复制过去。这些副本摘要相同、时间窗互相包含，
+会被合并成一行；`merge_overlapping` 保留最宽的那个窗口。同理，如果你在某个
+会话里 `--continue` 了几天，每天各得一行，不会合并成一行。
+
 `# 打卡` 的处理是另一个维度：只要某一天有运动记录，就确保存在 `- [x] 运动`;
 已经存在（含 `- [ ] 运动` 未勾选）就只做勾选，不会重复添加一行。
 
@@ -159,7 +166,7 @@ python3 -m diarysync ledger                    # 查看已记录的身份键
 
 ```bash
 python3 -m diarysync exercise [--csv PATH] [--since 2026-08-01] [--until 2026-09-16] [--days 30]
-python3 -m diarysync work     [--source all|codex|dsh] [--since ...] [--min-minutes 5]
+python3 -m diarysync work     [--source all|claude|codex|dsh] [--since ...] [--min-minutes 5]
 python3 -m diarysync sync     [--work-only | --exercise-only]
 python3 -m diarysync login
 python3 -m diarysync ledger   [--forget KEY...]
@@ -275,20 +282,49 @@ entries = diarysync.collect_work(
 
 | 来源 | 路径 | 说明 |
 | --- | --- | --- |
+| `claude` | `~/.claude/projects/<slug>/<session-uuid>.jsonl` | Claude Code 会话 |
 | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | 逐行 JSON |
 | `dsh` | `~/.dsh/sessions/<cwd>/session-*/session.jsonl.zstd` | zstd 压缩，需要 `sessions` extra 或系统 `zstd` |
 
-**只保留人真正驱动的会话。** Codex 在每条 rollout 的 `session_meta` 里记了
+`~/.claude` 的位置可以用 `CLAUDE_CONFIG_DIR` 覆盖（`~/.codex` 用 `CODEX_HOME`，
+`~/.dsh` 用 `DSH_HOME`）。
+
+**只保留人真正驱动的会话。**
+
+Codex 在每条 rollout 的 `session_meta` 里记了
 `thread_source`：`subagent`（子 agent）、`guardian_review`（自动审查）会被整条丢弃，
 因为它们的 prompt 是模板化的（"You are a Senior Code Reviewer …"），
 写进日记只会盖住真实工作。没有该字段的旧 transcript 会退回文本规则，
 继续过滤审查模板、`<system-reminder>`、`TRANSCRIPT START` 这类注入内容。
 
+Claude Code 更麻烦：**每一次工具调用都会写一条 `role: "user"` 记录**，
+所以光看 `type` 字段根本分辨不出人到底说了什么。以下四类会被丢掉：
+
+| 丢掉的记录 | 判据 | 是什么 |
+| --- | --- | --- |
+| 子 agent 对话 | `isSidechain` | Task 工具派生的子会话，以及 `subagents/` 目录下的整份文件 |
+| 注入内容 | `isMeta` | `<local-command-caveat>`、图片缩放提示、展开后的斜杠命令、`/context` 报告 |
+| 工具结果 | `toolUseResult` / `tool_result` 块 | 每次工具调用的返回值，本身不含 prompt |
+| 后台通知 | `origin.kind == "task-notification"` | 后台任务、其他会话发来的 `teammate-message` 等 |
+
+这些字段是**尽力而为**的：旧版本写下的记录可能一个都没有，此时退回到内容规则
+（跳过 `<command-name>`、`<bash-stdout>`、`TRANSCRIPT START` 等框架标记），
+而不是整条丢弃——否则会把真实工作一起丢掉。助手侧只取
+`text` 块，`thinking` 和 `tool_use` 一律不进日记。
+
+会话跨过午夜时，**（来源, 会话, 本地日期）** 这个三元组保证两天各记一条：
+`~/.claude` 里用 `--continue`/`--resume` 续上的会话经常会连着跑好几天。
+
 每一段的起止时间取当天事件时间戳的最小/最大值，摘要取该段第一条真实用户输入
 （如果 prompt 里有 `## goal` 段就优先取它，短的章节标题如 "Purpose" 会被跳过
-而取下面的正文），`#tag` 由关键词规则推理：
+而取下面的正文），`#tag` 只从 vault 里已经出现过的 tag 中选，不会自创：
 
-`#服务器`、`#故障`、`#审查`、`#配置`、`#文档`、`#科研`、`#开发`、`#整理`，兜底 `#工作`。
+1. prompt 里直接写了某个已有 tag（如“组会”）时，优先用它；
+2. 否则按关键词规则匹配，但只接受 vault 里已有的 tag；
+3. 都不命中时，用 vault 里出现次数最多的非运动 tag 兜底。
+
+扫描范围是 vault 下所有 Markdown 文件的 inline `#tag`，跳过代码块与隐藏目录
+（`.obsidian`、`.diarysync` 等）。vault 里一个 tag 都没有时，工作记录整行不写 tag。
 
 摘要相同且时间窗互相包含的条目会合并成一条（同一会话派生的多个子进程不至于
 在日记里炸成十几行）。
@@ -325,7 +361,7 @@ token_store   = "~/.garminconnect"
 overlap_ratio = 0.6
 checkin_label = "运动"
 complete_unchecked_checkin = true
-work_sources  = ["codex", "dsh"]
+work_sources  = ["claude", "codex", "dsh"]
 # summarizer_cmd = "llm -m gpt-4o-mini '压缩成一句中文摘要'"
 ```
 

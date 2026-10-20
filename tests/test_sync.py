@@ -167,6 +167,27 @@ def test_ledger_file_is_written_atomically_and_reads_back(vault: Path):
     assert all(entry["day"] == "2026-09-14" for entry in ledger.entries().values())
 
 
+def test_a_session_spanning_midnight_lands_on_both_days(vault: Path):
+    """Regression: the ledger key must include the day.
+
+    A session continued past midnight yields one entry per day.  Keyed on the
+    session alone, syncing the first day and then the second would report the
+    second as "already synced" and silently drop a day of work.
+    """
+    settings = load_settings(vault=vault)
+    first, second = date(2026, 7, 28), date(2026, 7, 29)
+    early = make_work(first, "23:30", "23:31", "看一下模型训练参数")
+    late = make_work(second, "00:45", "00:46", "继续核对 checkpoint")
+
+    assert run([early], settings).inserted == [early]
+
+    report = run([late], settings)
+
+    assert report.inserted == [late]
+    assert report.skipped == []
+    assert "继续核对 checkpoint" in (vault / "diary" / "2026-07-29.md").read_text(encoding="utf-8")
+
+
 def test_records_from_two_sources_for_one_activity_collapse(vault: Path):
     """API record and CSV record for the same run must not both be written."""
     day = date(2026, 9, 14)

@@ -40,6 +40,7 @@ from .config import (
 from .models import Activity, Record, WorkEntry
 from .sources.garmin import GarminAuthError
 from .sync import SyncReport, run
+from .tags import vault_tags
 
 __all__ = [
     "DEFAULT_WINDOW_DAYS",
@@ -174,6 +175,16 @@ def build_summarizer(command: str | None, *, timeout: int = 120) -> Summarizer |
     return summarizer
 
 
+def work_tag_vocabulary(settings: Settings) -> list[str]:
+    """Existing vault tags a work block may use, most frequent first.
+
+    The exercise tag is excluded: ``#运动`` belongs to Garmin records and a
+    work session that happened to run at the same time should not borrow it.
+    """
+    excluded = {"运动", settings.checkin_label}
+    return [tag for tag, _ in vault_tags(settings.vault).most_common() if tag not in excluded]
+
+
 def collect_work(
     settings: Settings,
     *,
@@ -187,8 +198,10 @@ def collect_work(
 ) -> list[WorkEntry]:
     """Return work blocks reconstructed from local agent transcripts.
 
-    ``source`` is ``"all"``, ``"codex"`` or ``"dsh"``.  Only threads a human
-    drove are considered; spawned sub-agents and automatic reviews are skipped.
+    ``source`` is ``"all"``, ``"claude"``, ``"codex"`` or ``"dsh"``.  Only
+    threads a human drove are considered; spawned sub-agents and automatic
+    reviews are skipped.  Tags are limited to those already present in the
+    vault, so the collector never invents one.
     """
     from .sources import sessions as session_sources
 
@@ -198,12 +211,16 @@ def collect_work(
     if not selected:
         return []
 
+    readers = {
+        "claude": session_sources.read_claude_events,
+        "codex": session_sources.read_codex_events,
+        "dsh": session_sources.read_dsh_events,
+    }
     events: list = []
     for origin, root in selected.items():
-        if origin == "codex":
-            events.extend(session_sources.read_codex_events(root))
-        elif origin == "dsh":
-            events.extend(session_sources.read_dsh_events(root))
+        reader = readers.get(origin)
+        if reader is not None:
+            events.extend(reader(root))
 
     return list(
         session_sources.collect_work_entries(
@@ -213,6 +230,7 @@ def collect_work(
             summarizer=summarizer,
             summary_limit=summary_limit,
             min_minutes=min_minutes,
+            allowed_tags=work_tag_vocabulary(settings),
         )
     )
 
