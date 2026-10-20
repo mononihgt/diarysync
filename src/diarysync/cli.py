@@ -17,6 +17,7 @@ from .api import (
     DEFAULT_WINDOW_DAYS,
     DEFAULT_WORK_WINDOW_DAYS,
     DiarySync,
+    default_summarizer_command,
     parse_day,
     resolve_window,
 )
@@ -57,6 +58,7 @@ def _facade(args, *, need_password: bool = False) -> DiarySync:
         token_store=getattr(args, "token_store", None),
         overlap_ratio=getattr(args, "overlap_ratio", None),
         summarizer_cmd=getattr(args, "summarizer", None),
+        auto_summarize=not getattr(args, "no_summarizer", False),
         dry_run=getattr(args, "dry_run", False),
         force=getattr(args, "force", False),
         prompt_for_password=need_password,
@@ -226,6 +228,8 @@ def cmd_doctor(args) -> int:
     print(f"garmin 区域  : {region}")
     print(f"token store  : {settings.token_store}")
     print(f"overlap_ratio: {settings.overlap_ratio}")
+    summarizer = settings.summarizer_cmd or default_summarizer_command()
+    print(f"summarizer   : {summarizer or '（未找到，使用本地规则）'}")
 
     print("\n依赖检查：")
     for module, extra, note in (
@@ -301,7 +305,12 @@ def _add_work_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--summary-limit", type=int, default=80, help="摘要最大字数")
     parser.add_argument(
         "--summarizer",
-        help="外部摘要命令（从 stdin 读 prompt，向 stdout 输出一行摘要）",
+        help="外部摘要命令（从 stdin 读完整工作记录，向 stdout 输出一行摘要）",
+    )
+    parser.add_argument(
+        "--no-summarizer",
+        action="store_true",
+        help="不调用自动摘要，直接使用本地规则",
     )
 
 

@@ -7,8 +7,9 @@ venv/
 dist/
 build/
 
-# diarysync runtime state (per-vault ledger)
+# diarysync runtime state (per-vault ledger and summary cache)
 .diarysync/ledger.json
+.diarysync/summary_cache.json
 
 # tooling
 .pytest_cache/

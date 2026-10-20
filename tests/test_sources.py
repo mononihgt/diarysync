@@ -240,6 +240,131 @@ def test_work_entry_line_format():
     )
 
 
+def test_collect_work_entries_summarizes_the_whole_block():
+    events = [
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 4), "user", "修复登录测试", "claude"),
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 10), "tool", "Edit: src/auth.py", "claude"),
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 30), "assistant", "已修复并通过测试", "claude"),
+    ]
+    seen: list[str] = []
+
+    def summarizer(context: str) -> str:
+        seen.append(context)
+        return "摘要：修复登录测试并运行通过"
+
+    entries = collect_work_entries(
+        events,
+        start=date(2026, 7, 28),
+        end=date(2026, 7, 28),
+        summarizer=summarizer,
+    )
+
+    assert len(seen) == 1
+    assert "修复登录测试" in seen[0]
+    assert "Edit: src/auth.py" in seen[0]
+    assert "已修复并通过测试" in seen[0]
+    assert entries[0].summary == "修复登录测试并运行通过"
+
+
+def test_collect_work_entries_skips_the_summarizer_for_known_records():
+    events = [
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 4), "user", "修复登录测试", "claude"),
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 30), "assistant", "已修复", "claude"),
+    ]
+    calls: list[str] = []
+
+    def summarizer(context: str) -> str:
+        calls.append(context)
+        return "模型摘要"
+
+    entries = collect_work_entries(
+        events,
+        start=date(2026, 7, 28),
+        end=date(2026, 7, 28),
+        summarizer=summarizer,
+        known_ids={"claude:s1:2026-07-28"},
+    )
+
+    assert calls == []
+    assert entries[0].summary == "修复登录测试"
+
+
+def test_collect_work_entries_falls_back_when_the_summarizer_returns_nothing():
+    events = [
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 4), "user", "修复登录测试", "claude"),
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 30), "assistant", "已修复", "claude"),
+    ]
+    entries = collect_work_entries(
+        events,
+        start=date(2026, 7, 28),
+        end=date(2026, 7, 28),
+        summarizer=lambda context: "",
+    )
+    assert entries[0].summary == "修复登录测试"
+
+
+def test_collect_work_entries_truncates_a_long_model_summary():
+    events = [
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 4), "user", "修复登录测试", "claude"),
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 30), "assistant", "已修复", "claude"),
+    ]
+    entries = collect_work_entries(
+        events,
+        start=date(2026, 7, 28),
+        end=date(2026, 7, 28),
+        summarizer=lambda context: "很长的摘要内容" * 20,
+        summary_limit=20,
+    )
+    assert len(entries[0].summary) <= 20
+
+
+def test_collect_work_entries_escapes_hashtags_in_the_summary():
+    events = [
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 4), "user", "修复登录测试", "claude"),
+        SessionEvent("s1", datetime(2026, 7, 28, 13, 30), "assistant", "已修复", "claude"),
+    ]
+    entries = collect_work_entries(
+        events,
+        start=date(2026, 7, 28),
+        end=date(2026, 7, 28),
+        summarizer=lambda context: "修复 #登录 问题",
+    )
+    assert entries[0].summary == r"修复 \#登录 问题"
+    assert entries[0].schedule_line() == r"- [x] 13:04 - 13:31 #故障 修复 \#登录 问题"
+
+
+def test_summary_context_is_bounded_and_covers_every_section():
+    from diarysync.sources.sessions import SUMMARY_CONTEXT_LIMIT
+
+    events = [
+        SessionEvent("s1", datetime(2026, 7, 28, 9, 0), "user", "长" * 10000, "claude"),
+        SessionEvent("s1", datetime(2026, 7, 28, 9, 1), "assistant", "回" * 10000, "claude"),
+    ]
+    events.extend(
+        SessionEvent("s1", datetime(2026, 7, 28, 9, 2), "tool", f"Bash: cmd {index}", "claude")
+        for index in range(100)
+    )
+    seen: list[str] = []
+
+    def summarizer(context: str) -> str:
+        seen.append(context)
+        return "摘要"
+
+    collect_work_entries(
+        events,
+        start=date(2026, 7, 28),
+        end=date(2026, 7, 28),
+        summarizer=summarizer,
+    )
+
+    context = seen[0]
+    assert len(context) <= SUMMARY_CONTEXT_LIMIT
+    assert "用户的请求" in context
+    assert "agent 的关键操作" in context
+    assert "agent 的回复要点" in context
+    assert "另有 60 个操作未列出" in context
+
+
 # ---------------------------------------------------------------------------
 # transcript readers
 # ---------------------------------------------------------------------------
@@ -257,6 +382,36 @@ def _rollout_line(ts: str, role: str, text: str) -> str:
                 "role": role,
                 "content": [{"type": "input_text", "text": text}],
             },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _rollout_tool_line(ts: str, name: str, arguments: dict) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "timestamp": ts,
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": name,
+                "arguments": json.dumps(arguments, ensure_ascii=False),
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _rollout_patch_line(ts: str, patch: str) -> str:
+    import json
+
+    return json.dumps(
+        {
+            "timestamp": ts,
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": patch},
         },
         ensure_ascii=False,
     )
@@ -285,6 +440,36 @@ def test_codex_reader_keeps_real_sessions_and_drops_boilerplate(tmp_path: Path):
     events = list(read_codex_events(tmp_path))
     assert [event.text for event in events] == ["看一下模型训练参数", "已完成"]
     assert events[0].session_id == "019fa746-4d47-7322-baf3-92c8abbb3f5c"
+
+
+def test_codex_reader_collects_tool_calls(tmp_path: Path):
+    from diarysync.sources.sessions import read_codex_events
+
+    _write_rollout(
+        tmp_path,
+        "rollout-2026-07-28T13-00-00-019fa746-4d47-7322-baf3-92c8abbb3f5d.jsonl",
+        [
+            _rollout_line("2026-07-28T13:04:00", "user", "修复构建"),
+            _rollout_tool_line(
+                "2026-07-28T13:05:00",
+                "exec_command",
+                {"cmd": "pytest -q", "workdir": "/vault"},
+            ),
+            _rollout_patch_line(
+                "2026-07-28T13:06:00",
+                "*** Begin Patch\n*** Update File: src/app.py\n@@\n",
+            ),
+            _rollout_line("2026-07-28T13:07:00", "assistant", "已修复"),
+        ],
+    )
+
+    events = list(read_codex_events(tmp_path))
+    assert [(event.role, event.text) for event in events] == [
+        ("user", "修复构建"),
+        ("tool", "exec_command: pytest -q"),
+        ("tool", "apply_patch: src/app.py"),
+        ("assistant", "已修复"),
+    ]
 
 
 def test_codex_reader_drops_approval_review_rollouts(tmp_path: Path):
@@ -344,6 +529,51 @@ def test_dsh_reader_reads_zstd_transcripts(tmp_path: Path):
     assert len(events) == 1
     assert events[0].text == "安装一下这个插件"
     assert events[0].session_id == "session-abc"
+
+
+def test_dsh_reader_collects_tool_calls(tmp_path: Path):
+    zstandard = pytest.importorskip("zstandard")
+    import json
+
+    session_dir = tmp_path / "sessions" / "--vault--" / "session-tool"
+    session_dir.mkdir(parents=True)
+    lines = [
+        {
+            "type": "user/message",
+            "time": 1785218640000,
+            "data": {
+                "role": "user",
+                "source": {"kind": "user"},
+                "content": [{"type": "text", "text": "整理实验数据"}],
+            },
+        },
+        {
+            "type": "tool/call",
+            "time": 1785218641000,
+            "data": {
+                "name": "exec",
+                "arguments": json.dumps({"cmd": "python analyze.py"}),
+            },
+        },
+        {
+            "type": "assistant/message",
+            "time": 1785218642000,
+            "data": {"message": {"content": [{"type": "text", "text": "已完成"}]}},
+        },
+    ]
+    payload = "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n"
+    (session_dir / "session.jsonl.zstd").write_bytes(
+        zstandard.ZstdCompressor().compress(payload.encode("utf-8"))
+    )
+
+    from diarysync.sources.sessions import read_dsh_events
+
+    events = list(read_dsh_events(tmp_path))
+    assert [(event.role, event.text) for event in events] == [
+        ("user", "整理实验数据"),
+        ("tool", "exec: python analyze.py"),
+        ("assistant", "已完成"),
+    ]
 
 
 def _session_meta_line(ts: str, thread_source: str | None, *, subagent: bool = False) -> str:
@@ -478,7 +708,7 @@ def _write_claude_session(root: Path, session_id: str, lines: list[str]) -> Path
     return path
 
 
-def test_claude_reader_keeps_human_prompts_and_drops_tool_results(tmp_path: Path):
+def test_claude_reader_keeps_human_prompts_and_tool_calls(tmp_path: Path):
     from diarysync.sources.sessions import read_claude_events
 
     _write_claude_session(
@@ -489,7 +719,13 @@ def test_claude_reader_keeps_human_prompts_and_drops_tool_results(tmp_path: Path
             _claude_tool_result("2026-07-28T13:54:00.000Z"),
             _claude_assistant(
                 "2026-07-28T13:55:00.000Z",
-                [{"type": "tool_use", "name": "Read", "input": {}}],
+                [
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {"file_path": "src/train.py"},
+                    }
+                ],
             ),
             _claude_assistant(
                 "2026-07-28T13:56:00.000Z",
@@ -505,6 +741,7 @@ def test_claude_reader_keeps_human_prompts_and_drops_tool_results(tmp_path: Path
 
     assert [(event.role, event.text) for event in events] == [
         ("user", "看一下模型训练参数"),
+        ("tool", "Read: src/train.py"),
         ("assistant", "已完成"),
     ]
     assert events[0].session_id == "b677412e-bbff-44bc-be5b-81e5a7a7fa87"

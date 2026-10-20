@@ -22,14 +22,19 @@ their own pipeline:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import shlex
+import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .config import (
+    CONFIG_DIR_NAME,
+    SUMMARY_CACHE_FILE_NAME,
     Settings,
     find_vault,
     load_settings,
@@ -37,6 +42,7 @@ from .config import (
     prompt_mfa,
     prompt_password,
 )
+from .ledger import Ledger
 from .models import Activity, Record, WorkEntry
 from .sources.garmin import GarminAuthError
 from .sync import SyncReport, run
@@ -59,6 +65,14 @@ DEFAULT_WINDOW_DAYS = 30
 DEFAULT_WORK_WINDOW_DAYS = 14
 
 Summarizer = Callable[[str], str]
+
+#: Used when no ``summarizer_cmd`` is configured and Claude Code is installed.
+DEFAULT_SUMMARIZER_COMMAND = 'claude -p --safe-mode --tools "" --no-session-persistence'
+
+
+def default_summarizer_command() -> str | None:
+    """Return the built-in summarizer command when ``claude`` is on PATH."""
+    return DEFAULT_SUMMARIZER_COMMAND if shutil.which("claude") else None
 
 
 # ---------------------------------------------------------------------------
@@ -148,20 +162,20 @@ def collect_activities(
 
 
 def build_summarizer(command: str | None, *, timeout: int = 120) -> Summarizer | None:
-    """Wrap an external command as a ``prompt -> one-line summary`` callable.
+    """Wrap an external command as a ``context -> one-line summary`` callable.
 
-    The command receives the raw prompt on stdin and must print the summary on
-    stdout.  A failing command degrades to ``""``, which makes
+    The command receives the full work context on stdin and must print the
+    summary on stdout.  A failing command degrades to ``""``, which makes
     :func:`collect_work` fall back to the built-in heuristic.
     """
     if not command:
         return None
     argv = shlex.split(command)
 
-    def summarizer(prompt: str) -> str:
+    def summarizer(context: str) -> str:
         try:
             completed = subprocess.run(
-                argv, input=prompt, capture_output=True, text=True, timeout=timeout
+                argv, input=context, capture_output=True, text=True, timeout=timeout
             )
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -173,6 +187,53 @@ def build_summarizer(command: str | None, *, timeout: int = 120) -> Summarizer |
         return ""
 
     return summarizer
+
+
+class _SummaryCache:
+    """Persist external summaries so repeated syncs do not re-query the model."""
+
+    def __init__(self, path: Path, *, persist: bool) -> None:
+        self.path = path
+        self.persist = persist
+        self.entries = self._load()
+        self.dirty = False
+
+    def _load(self) -> dict[str, str]:
+        if not self.path.is_file():
+            return {}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"无法读取摘要缓存 {self.path}: {exc}") from exc
+        summaries = payload.get("summaries") if isinstance(payload, dict) else None
+        if not isinstance(summaries, dict):
+            raise RuntimeError(f"摘要缓存格式不正确: {self.path}")
+        return {str(key): value for key, value in summaries.items() if isinstance(value, str)}
+
+    def wrap(self, namespace: str, summarizer: Summarizer) -> Summarizer:
+        def cached(context: str) -> str:
+            key = hashlib.sha256(f"{namespace}\0{context}".encode()).hexdigest()
+            if key in self.entries:
+                return self.entries[key]
+            summary = summarizer(context)
+            if summary:
+                self.entries[key] = summary
+                self.dirty = True
+            return summary
+
+        return cached
+
+    def save(self) -> None:
+        if not self.persist or not self.dirty:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "summaries": self.entries}
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(self.path)
 
 
 def work_tag_vocabulary(settings: Settings) -> list[str]:
@@ -195,13 +256,15 @@ def collect_work(
     min_minutes: int = 0,
     summary_limit: int = 80,
     roots: dict[str, Path] | None = None,
+    known_ids: Collection[str] | None = None,
 ) -> list[WorkEntry]:
     """Return work blocks reconstructed from local agent transcripts.
 
     ``source`` is ``"all"``, ``"claude"``, ``"codex"`` or ``"dsh"``.  Only
     threads a human drove are considered; spawned sub-agents and automatic
     reviews are skipped.  Tags are limited to those already present in the
-    vault, so the collector never invents one.
+    vault, so the collector never invents one.  ``known_ids`` names records the
+    ledger already has; those skip the summarizer and keep the local summary.
     """
     from .sources import sessions as session_sources
 
@@ -231,6 +294,7 @@ def collect_work(
             summary_limit=summary_limit,
             min_minutes=min_minutes,
             allowed_tags=work_tag_vocabulary(settings),
+            known_ids=known_ids,
         )
     )
 
@@ -268,6 +332,8 @@ class DiarySync:
     prompt_for_password: bool = False
     #: External summarizer command for :meth:`work`.
     summarizer_cmd: str | None = None
+    #: Use a configured or auto-detected agent CLI for work summaries.
+    auto_summarize: bool = True
 
     settings: Settings = field(init=False, repr=False)
 
@@ -386,15 +452,36 @@ class DiarySync:
         start, end = resolve_window(
             since=since, until=until, days=days, default_days=DEFAULT_WORK_WINDOW_DAYS
         )
-        return collect_work(
-            self.settings,
-            since=start,
-            until=end,
-            source=source,
-            summarizer=build_summarizer(self.settings.summarizer_cmd),
-            min_minutes=min_minutes,
-            summary_limit=summary_limit,
-        )
+        known_ids = None
+        if self.settings.use_ledger and not self.force:
+            ledger_keys = Ledger(self.settings.ledger_path).load().entries()
+            known_ids = {key[3:] for key in ledger_keys if key.startswith("id:")}
+        command = None
+        if self.auto_summarize:
+            command = self.settings.summarizer_cmd or default_summarizer_command()
+        summarizer = build_summarizer(command)
+        cache: _SummaryCache | None = None
+        if summarizer is not None:
+            assert command is not None
+            cache = _SummaryCache(
+                self.settings.vault / CONFIG_DIR_NAME / SUMMARY_CACHE_FILE_NAME,
+                persist=not self.dry_run,
+            )
+            summarizer = cache.wrap(command, summarizer)
+        try:
+            return collect_work(
+                self.settings,
+                since=start,
+                until=end,
+                source=source,
+                summarizer=summarizer,
+                min_minutes=min_minutes,
+                summary_limit=summary_limit,
+                known_ids=known_ids,
+            )
+        finally:
+            if cache is not None:
+                cache.save()
 
     # -- writing -----------------------------------------------------------
 

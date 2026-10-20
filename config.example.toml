@@ -30,6 +30,8 @@ complete_unchecked_checkin = true
 # "codex" reads ~/.codex (CODEX_HOME), "dsh" reads ~/.dsh (DSH_HOME).
 work_sources = ["claude", "codex", "dsh"]
 
-# Optional: replace the built-in heuristic summary with an LLM call.
-# The command receives the raw prompt on stdin and must print one line.
-# summarizer_cmd = "llm -m gpt-4o-mini '压缩成一句中文工作摘要'"
+# Optional: replace the automatic summary command. The command receives the
+# full work context (user prompts, assistant text and tool calls) on stdin and
+# must print one line. With no command, diarysync uses the installed `claude`
+# CLI automatically; without it, the first user prompt is used.
+# summarizer_cmd = "llm -m gpt-4o-mini"

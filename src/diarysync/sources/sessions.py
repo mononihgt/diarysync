@@ -10,9 +10,10 @@ Three transcript formats are supported:
   (zstd-compressed, one JSON object per line).
 
 A session that spans several days is split per local day.  The time window is
-the min/max event timestamp of that day; the summary is the first real user
-prompt; the tag comes from :func:`infer_tag`, restricted to tags the vault
-already uses.
+the min/max event timestamp of that day.  An external summarizer receives the
+whole block, including tool calls; without one, the summary comes from the
+first real user prompt.  The tag comes from :func:`infer_tag`, restricted to
+tags the vault already uses.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
@@ -93,9 +94,9 @@ _TS_RE = re.compile(
 class SessionEvent:
     session_id: str
     ts: datetime
-    role: str  # "user" | "assistant"
+    role: str  # "user" | "assistant" | "tool"
     text: str
-    origin: str  # "codex" | "dsh"
+    origin: str  # "claude" | "codex" | "dsh"
 
 
 # ---------------------------------------------------------------------------
@@ -278,13 +279,24 @@ def _claude_events_from_file(path: Path) -> list[SessionEvent]:
         content = message.get("content")
         if kind == "user" and not _claude_is_human_turn(payload, content):
             continue
+        session_id = payload.get("sessionId") or fallback_id
         for text in _claude_texts(content):
             if kind == "user" and _is_boilerplate(text):
                 continue
-            events.append(
-                SessionEvent(payload.get("sessionId") or fallback_id, ts, kind, text, "claude")
-            )
+            events.append(SessionEvent(session_id, ts, kind, text, "claude"))
+        if kind == "assistant":
+            for description in _claude_tool_calls(content):
+                events.append(SessionEvent(session_id, ts, "tool", description, "claude"))
     return events
+
+
+def _claude_tool_calls(content) -> Iterator[str]:
+    if not isinstance(content, list):
+        return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        yield _format_tool_call(str(block.get("name") or "tool"), block.get("input"))
 
 
 def _claude_texts(content) -> Iterator[str]:
@@ -386,7 +398,19 @@ def _codex_events_from_file(path: Path) -> list[SessionEvent]:
         if payload.get("type") != "response_item":
             continue
         body = payload.get("payload")
-        if not isinstance(body, dict) or body.get("type") != "message":
+        if not isinstance(body, dict):
+            continue
+        body_type = body.get("type")
+        if body_type in ("function_call", "custom_tool_call"):
+            name = body.get("name") or body_type
+            arguments = body.get("input") if body_type == "custom_tool_call" else None
+            if arguments is None:
+                arguments = body.get("arguments")
+            events.append(
+                SessionEvent(session_id, ts, "tool", _format_tool_call(str(name), arguments), "codex")
+            )
+            continue
+        if body_type != "message":
             continue
         role = body.get("role")
         if role not in ("user", "assistant"):
@@ -450,6 +474,11 @@ def read_dsh_events(root: str | Path = DEFAULT_DSH_ROOT) -> Iterator[SessionEven
                     continue
                 for text in _dsh_texts(message.get("content")):
                     yield SessionEvent(session_id, ts, "assistant", text, "dsh")
+            elif kind == "tool/call":
+                name = data.get("name")
+                if name:
+                    description = _format_tool_call(str(name), data.get("arguments"))
+                    yield SessionEvent(session_id, ts, "tool", description, "dsh")
 
 
 def _dsh_texts(content) -> Iterator[str]:
@@ -477,6 +506,196 @@ def _session_id_from_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 _GOAL_RE = re.compile(r"^#{1,3}\s*(?:goal|目标)\s*$(.*?)(?=^#{1,3}\s|\Z)", re.IGNORECASE | re.MULTILINE | re.DOTALL)
+
+#: 交给外部摘要命令的上下文上限。
+SUMMARY_CONTEXT_LIMIT = 12000
+_SUMMARY_USER_ITEMS = 8
+_SUMMARY_ASSISTANT_ITEMS = 3
+_SUMMARY_TOOL_ITEMS = 40
+_SUMMARY_USER_CHARS = 800
+_SUMMARY_ASSISTANT_CHARS = 1000
+_SUMMARY_TOOL_CHARS = 200
+_SUMMARY_USER_BUDGET = 4000
+_SUMMARY_ASSISTANT_BUDGET = 3000
+_SUMMARY_TOOL_BUDGET = 3500
+
+_PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
+_TOOL_ARG_KEYS = (
+    "description",
+    "cmd",
+    "command",
+    "query",
+    "url",
+    "file_path",
+    "path",
+    "skill",
+    "subagent_type",
+)
+_SUMMARY_PREFIX_RE = re.compile(r"^(?:摘要|总结|summary)\s*[:：]\s*", re.IGNORECASE)
+_SUMMARY_BULLET_RE = re.compile(r"^(?:[-*•]|\d{1,2}[.、)])\s+")
+
+
+def _parse_tool_arguments(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(parsed, dict):
+            return parsed
+    return value
+
+
+def _clip(text, limit):
+    collapsed = _WHITESPACE_RE.sub(" ", str(text)).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _format_tool_call(name: str, arguments) -> str:
+    """Reduce one tool call to a single line for the summarizer context."""
+    name = (name or "tool").strip() or "tool"
+    parsed = _parse_tool_arguments(arguments)
+    if isinstance(parsed, dict):
+        for key in _TOOL_ARG_KEYS:
+            value = parsed.get(key)
+            if not value:
+                continue
+            if isinstance(value, (list, tuple)):
+                value = " ".join(str(item) for item in value)
+            return f"{name}: {_clip(value, _SUMMARY_TOOL_CHARS)}"
+        for value in parsed.values():
+            if isinstance(value, str) and value.strip():
+                return f"{name}: {_clip(value, _SUMMARY_TOOL_CHARS)}"
+        return name
+    if isinstance(parsed, str) and parsed.strip():
+        if name == "apply_patch":
+            files = _PATCH_FILE_RE.findall(parsed)
+            if files:
+                return f"{name}: {_clip(', '.join(files[:3]), _SUMMARY_TOOL_CHARS)}"
+        return f"{name}: {_clip(parsed, _SUMMARY_TOOL_CHARS)}"
+    return name
+
+
+def _tool_items(events: Iterable[SessionEvent]) -> list[str]:
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for event in events:
+        if event.role != "tool":
+            continue
+        text = _WHITESPACE_RE.sub(" ", event.text).strip()
+        if not text:
+            continue
+        if text not in counts:
+            order.append(text)
+        counts[text] = counts.get(text, 0) + 1
+    items = [
+        text + (f"（{counts[text]} 次）" if counts[text] > 1 else "")
+        for text in order[:_SUMMARY_TOOL_ITEMS]
+    ]
+    if len(order) > _SUMMARY_TOOL_ITEMS:
+        items.append(f"另有 {len(order) - _SUMMARY_TOOL_ITEMS} 个操作未列出")
+    return items
+
+
+def _bullet_section(
+    lines: list[str],
+    title: str,
+    items: list[str],
+    *,
+    item_limit: int,
+    budget: int,
+) -> None:
+    lines.append(title)
+    if not items:
+        lines.append("- （无）")
+        return
+    used = 0
+    for item in items:
+        line = f"- {_clip(item, item_limit)}"
+        if used + len(line) + 1 > budget:
+            lines.append("- …")
+            return
+        lines.append(line)
+        used += len(line) + 1
+
+
+def _render_work_context(
+    events: Iterable[SessionEvent],
+    *,
+    day: date,
+    start: datetime,
+    end: datetime,
+    origin: str,
+    summary_limit: int,
+) -> str:
+    """Build the text handed to an external summarizer for one work block."""
+    events = list(events)
+    user_items: list[str] = []
+    assistant_items: list[str] = []
+    for event in events:
+        text = _WHITESPACE_RE.sub(" ", event.text).strip()
+        if not text:
+            continue
+        if event.role == "user":
+            if text not in user_items:
+                user_items.append(text)
+        elif event.role == "assistant":
+            assistant_items.append(text)
+
+    lines = [
+        f"请根据下面的记录，用不超过 {summary_limit} 个字符的中文概括这段时间里"
+        "人和 agent 合作完成了什么。",
+        "只输出摘要本身，不要编号、前缀、引号或解释。",
+        "",
+        f"日期：{day.isoformat()}",
+        f"时间：{start:%H:%M} - {end:%H:%M}",
+        f"来源：{origin}",
+        "",
+    ]
+    _bullet_section(
+        lines,
+        "用户的请求：",
+        user_items[:_SUMMARY_USER_ITEMS],
+        item_limit=_SUMMARY_USER_CHARS,
+        budget=_SUMMARY_USER_BUDGET,
+    )
+    lines.append("")
+    _bullet_section(
+        lines,
+        "agent 的关键操作：",
+        _tool_items(events),
+        item_limit=_SUMMARY_TOOL_CHARS,
+        budget=_SUMMARY_TOOL_BUDGET,
+    )
+    lines.append("")
+    _bullet_section(
+        lines,
+        "agent 的回复要点：",
+        assistant_items[-_SUMMARY_ASSISTANT_ITEMS:],
+        item_limit=_SUMMARY_ASSISTANT_CHARS,
+        budget=_SUMMARY_ASSISTANT_BUDGET,
+    )
+    context = "\n".join(lines)
+    if len(context) > SUMMARY_CONTEXT_LIMIT:
+        context = context[: SUMMARY_CONTEXT_LIMIT - 1].rstrip() + "…"
+    return context
+
+
+def _clean_summary(text: str, limit: int) -> str:
+    """Normalise one line of model output into a diary-sized summary."""
+    summary = _WHITESPACE_RE.sub(" ", (text or "").strip())
+    summary = summary.strip("`'\"“”‘’")
+    summary = _SUMMARY_BULLET_RE.sub("", summary)
+    summary = _SUMMARY_PREFIX_RE.sub("", summary)
+    summary = summary.strip().strip("`'\"“”‘’")
+    if len(summary) > limit:
+        summary = summary[: limit - 1].rstrip(" ,，。;；:：") + "…"
+    return summary
+
 
 _TAG_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("服务器", ("ssh", "服务器", "远端", "tmux", "部署", "systemd", "ecs", "隧道", "sync 到", "训练服务器")),
@@ -615,13 +834,18 @@ def collect_work_entries(
     summary_limit: int = 80,
     min_minutes: int = 0,
     allowed_tags: Sequence[str] | None = None,
+    known_ids: Collection[str] | None = None,
 ) -> list[WorkEntry]:
     """Group events into one work entry per (origin, session, local day).
 
-    ``allowed_tags`` is forwarded to :func:`infer_tag`; ``None`` keeps the
-    unrestricted keyword rules for callers that bring their own vocabulary.
+    ``summarizer`` receives the whole block context (user prompts, assistant
+    prose and tool calls), not just the opening prompt.  When it is absent or
+    returns nothing, :func:`summarise_prompt` writes the summary from the first
+    user prompt.  ``known_ids`` names blocks the ledger already has, so they
+    skip the summarizer.  ``allowed_tags`` is forwarded to :func:`infer_tag`;
+    ``None`` keeps the unrestricted keyword rules for callers that bring their
+    own vocabulary.
     """
-    summarise = summarizer or (lambda text: summarise_prompt(text, summary_limit))
 
     def sort_key(event: SessionEvent):
         return (event.origin, event.session_id, event.ts.date(), event.ts)
@@ -652,7 +876,22 @@ def collect_work_entries(
             # No human turn at all: an internal sub-agent / approval-review
             # rollout.  Recording it would only add noise.
             continue
-        summary = summarise(prompt) or "对话与工具操作"
+        source_id = f"{origin}:{session_id}:{day.isoformat()}"
+        already_synced = known_ids is not None and source_id in known_ids
+        summary = ""
+        if summarizer is not None and not already_synced:
+            context = _render_work_context(
+                group,
+                day=day,
+                start=first,
+                end=end_dt,
+                origin=origin,
+                summary_limit=summary_limit,
+            )
+            summary = _clean_summary(summarizer(context), summary_limit)
+        if not summary:
+            summary = summarise_prompt(prompt, summary_limit)
+        summary = (summary or "对话与工具操作").replace("#", "\\#")
         entries.append(
             WorkEntry.build(
                 day=day,

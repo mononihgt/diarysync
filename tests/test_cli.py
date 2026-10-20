@@ -18,12 +18,14 @@ def isolated(monkeypatch, vault):
     class Recorder:
         def __init__(self) -> None:
             self.calls: list[tuple] = []
+            self.instance = None
 
     recorder = Recorder()
     real_init = DiarySync.__init__
 
     def fake_init(self, *args, **kwargs):
         real_init(self, *args, **kwargs)
+        recorder.instance = self
         self.__dict__["_recorder"] = recorder
 
     def fake_activities(self, **kwargs):
@@ -51,6 +53,16 @@ def test_sync_collects_both_kinds(isolated, vault):
 def test_sync_work_only_skips_exercise(isolated, vault):
     assert cli.main(["sync", "--vault", str(vault), "--work-only"]) == 0
     assert [name for name, _ in isolated.calls] == ["work_entries"]
+
+
+def test_sync_enables_automatic_summaries_by_default(isolated, vault):
+    assert cli.main(["sync", "--vault", str(vault), "--work-only"]) == 0
+    assert isolated.instance.auto_summarize is True
+
+
+def test_no_summarizer_flag_disables_automatic_summaries(isolated, vault):
+    assert cli.main(["sync", "--vault", str(vault), "--work-only", "--no-summarizer"]) == 0
+    assert isolated.instance.auto_summarize is False
 
 
 def test_sync_exercise_only_skips_work(isolated, vault):

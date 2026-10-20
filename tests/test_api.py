@@ -327,3 +327,40 @@ def test_build_summarizer_degrades_on_failure():
 
 def test_build_summarizer_is_none_without_a_command():
     assert diarysync.build_summarizer(None) is None
+
+
+def test_summary_cache_reuses_and_persists_results(tmp_path: Path):
+    from diarysync.api import _SummaryCache
+
+    calls: list[str] = []
+
+    def summarize(context: str) -> str:
+        calls.append(context)
+        return f"摘要 {len(calls)}"
+
+    path = tmp_path / "summary_cache.json"
+    cache = _SummaryCache(path, persist=True)
+    wrapped = cache.wrap("cmd", summarize)
+
+    assert wrapped("same context") == "摘要 1"
+    assert wrapped("same context") == "摘要 1"
+    assert cache.wrap("another cmd", summarize)("same context") == "摘要 2"
+    assert calls == ["same context", "same context"]
+    cache.save()
+
+    reopened = _SummaryCache(path, persist=False)
+    assert reopened.wrap("cmd", summarize)("same context") == "摘要 1"
+    assert calls == ["same context", "same context"]
+
+
+def test_summary_cache_dry_run_does_not_write(tmp_path: Path):
+    from diarysync.api import _SummaryCache
+
+    path = tmp_path / "summary_cache.json"
+    cache = _SummaryCache(path, persist=False)
+    wrapped = cache.wrap("cmd", lambda context: "摘要")
+
+    assert wrapped("context") == "摘要"
+    cache.save()
+
+    assert not path.exists()

@@ -28,6 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 CONFIG_DIR_NAME = ".diarysync"
 CONFIG_FILE_NAME = "config.toml"
 LEDGER_FILE_NAME = "ledger.json"
+SUMMARY_CACHE_FILE_NAME = "summary_cache.json"
 
 DEFAULT_TOKEN_STORE = "~/.garminconnect"
 DEFAULT_DIARY_DIR = "diary"
